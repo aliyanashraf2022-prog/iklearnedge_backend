@@ -57,7 +57,7 @@ router.get('/stats', authenticate, requireAdmin, async (req, res) => {
         completedClasses: parseInt(completedClasses.rows[0].count),
         totalSubjects: parseInt(subjectsCount.rows[0].count),
         activeSubjects: parseInt(activeSubjects.rows[0].count),
-        totalRevenue: parseFloat(revenue.rows[0].coalesce)
+        totalRevenue: parseFloat(revenue.rows[0].coalesce || revenue.rows[0].sum || 0)
       }
     });
   } catch (error) {

@@ -95,9 +95,21 @@ router.get('/all', authenticate, requireAdmin, async (req, res) => {
   try {
     const result = await query(`
       SELECT 
-        t.id, t.user_id, u.name, u.email, u.profile_picture,
-        t.bio, t.verification_status, t.is_live, t.meeting_link,
+        t.id,
+        t.user_id,
+        u.name,
+        u.email,
+        u.profile_picture,
+        t.bio,
+        t.verification_status,
+        t.is_live,
+        t.meeting_link,
         t.verification_notes,
+        t.created_at,
+        COALESCE(
+          ARRAY_AGG(DISTINCT ts.subject_id) FILTER (WHERE ts.subject_id IS NOT NULL),
+          ARRAY[]::uuid[]
+        ) as subject_ids,
         ARRAY_AGG(DISTINCT s.name) as subject_names
       FROM teachers t
       JOIN users u ON t.user_id = u.id
