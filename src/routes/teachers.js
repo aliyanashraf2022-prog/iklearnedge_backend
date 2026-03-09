@@ -38,16 +38,6 @@ router.get('/top', async (req, res) => {
     });
   }
 });
-const express = require('express');
-const { body, validationResult } = require('express-validator');
-const { query, transaction } = require('../models/database');
-const { authenticate, requireTeacher, requireAdmin } = require('../middleware/auth');
-
-const router = express.Router();
-
-// @route   GET /api/teachers
-// @desc    Get all live teachers
-// @access  Public
 router.get('/', async (req, res) => {
   try {
     const { subject, search } = req.query;
