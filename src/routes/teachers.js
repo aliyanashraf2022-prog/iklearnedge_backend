@@ -7,14 +7,14 @@ const { authenticate, requireTeacher, requireAdmin } = require('../middleware/au
 const router = express.Router();
 
 // @route   GET /api/teachers/top
-// @desc    Get top teachers by years of experience
+// @desc    Get top teachers 
 // @access  Public
 router.get('/top', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 5;
     const result = await query(`
       SELECT 
-        t.id, t.user_id, u.name, u.profile_picture, t.bio, t.years_of_experience,
+        t.id, t.user_id, u.name, u.profile_picture, t.bio,
         ARRAY_AGG(DISTINCT s.name) as subject_names
       FROM teachers t
       JOIN users u ON t.user_id = u.id
@@ -22,7 +22,7 @@ router.get('/top', async (req, res) => {
       LEFT JOIN subjects s ON ts.subject_id = s.id
       WHERE t.is_live = true AND t.verification_status = 'approved'
       GROUP BY t.id, u.id
-      ORDER BY t.years_of_experience DESC
+      ORDER BY t.created_at DESC
       LIMIT $1
     `, [limit]);
     res.json({
