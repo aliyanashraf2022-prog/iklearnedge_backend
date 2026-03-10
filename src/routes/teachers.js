@@ -106,10 +106,6 @@ router.get('/all', authenticate, requireAdmin, async (req, res) => {
         t.meeting_link,
         t.verification_notes,
         t.created_at,
-        COALESCE(
-          ARRAY_AGG(DISTINCT ts.subject_id) FILTER (WHERE ts.subject_id IS NOT NULL),
-          ARRAY[]::uuid[]
-        ) as subject_ids,
         ARRAY_AGG(DISTINCT s.name) as subject_names
       FROM teachers t
       JOIN users u ON t.user_id = u.id
