@@ -644,7 +644,7 @@ router.get('/settings', authenticate, requireAdmin, async (req, res) => {
   try {
     const result = await query('SELECT * FROM site_settings ORDER BY setting_key');
     
-    const settings: Record<string, any> = {};
+    const settings = {};
     result.rows.forEach(row => {
       if (row.setting_type === 'number') {
         settings[row.setting_key] = parseFloat(row.setting_value);
