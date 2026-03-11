@@ -19,7 +19,7 @@ router.get('/top', async (req, res) => {
       FROM top_verified_teachers tvt
       JOIN teachers t ON tvt.teacher_id = t.id
       JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.subject_id
+      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
       LEFT JOIN subjects s ON ts.subject_id = s.id
       WHERE t.verification_status = 'approved'
       GROUP BY t.id, u.id, tvt.position
