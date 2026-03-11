@@ -12,10 +12,11 @@ const router = express.Router();
 router.get('/top', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 5;
-    const result = await query(`
+    
+    let result = await query(`
       SELECT 
         t.id, t.user_id, u.name, u.profile_picture, t.bio,
-        ARRAY_AGG(DISTINCT s.name) as subject_names
+        COALESCE(ARRAY_AGG(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL), '{}') as subject_names
       FROM top_verified_teachers tvt
       JOIN teachers t ON tvt.teacher_id = t.id
       JOIN users u ON t.user_id = u.id
@@ -26,6 +27,23 @@ router.get('/top', async (req, res) => {
       ORDER BY tvt.position ASC, tvt.created_at ASC
       LIMIT $1
     `, [limit]);
+
+    if (result.rows.length === 0) {
+      result = await query(`
+        SELECT 
+          t.id, t.user_id, u.name, u.profile_picture, t.bio,
+          COALESCE(ARRAY_AGG(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL), '{}') as subject_names
+        FROM teachers t
+        JOIN users u ON t.user_id = u.id
+        LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
+        LEFT JOIN subjects s ON ts.subject_id = s.id
+        WHERE t.verification_status = 'approved' AND t.is_live = true
+        GROUP BY t.id, u.id
+        ORDER BY t.created_at DESC
+        LIMIT $1
+      `, [limit]);
+    }
+    
     res.json({
       success: true,
       count: result.rows.length,
