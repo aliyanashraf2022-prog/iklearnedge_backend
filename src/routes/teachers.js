@@ -7,7 +7,7 @@ const { authenticate, requireTeacher, requireAdmin } = require('../middleware/au
 const router = express.Router();
 
 // @route   GET /api/teachers/top
-// @desc    Get top teachers 
+// @desc    Get top teachers (Public)
 // @access  Public
 router.get('/top', async (req, res) => {
   try {
@@ -16,13 +16,14 @@ router.get('/top', async (req, res) => {
       SELECT 
         t.id, t.user_id, u.name, u.profile_picture, t.bio,
         ARRAY_AGG(DISTINCT s.name) as subject_names
-      FROM teachers t
+      FROM top_verified_teachers tvt
+      JOIN teachers t ON tvt.teacher_id = t.id
       JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
+      LEFT JOIN teacher_subjects ts ON t.id = ts.subject_id
       LEFT JOIN subjects s ON ts.subject_id = s.id
-      WHERE t.is_live = true AND t.verification_status = 'approved'
-      GROUP BY t.id, u.id
-      ORDER BY t.created_at DESC
+      WHERE t.verification_status = 'approved'
+      GROUP BY t.id, u.id, tvt.position
+      ORDER BY tvt.position ASC, tvt.created_at ASC
       LIMIT $1
     `, [limit]);
     res.json({
@@ -31,14 +32,18 @@ router.get('/top', async (req, res) => {
       data: result.rows
     });
   } catch (error) {
-    console.error('Get top teachers error:', error);
+    console.error('Get public top teachers error:', error);
     res.status(500).json({
       success: false,
       message: 'Failed to get top teachers'
     });
   }
 });
-router.get('/', async (req, res) => {
+
+// @route   GET /api/teachers/all
+// @desc    Get all teachers (admin only)
+// @access  Private/Admin
+router.get('/all', authenticate, requireAdmin, async (req, res) => {
   try {
     const { subject, search } = req.query;
 

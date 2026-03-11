@@ -363,4 +363,338 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// @route   GET /api/admin/teachers
+// @desc    Get all teachers
+// @access  Private/Admin
+router.get('/teachers', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT 
+        t.id,
+        t.user_id,
+        u.name as full_name,
+        u.name,
+        u.email,
+        u.profile_picture,
+        u.profile_picture as profilePicture,
+        u.created_at as joined_at,
+        t.bio,
+        t.verification_status,
+        t.verification_notes,
+        t.created_at,
+        t.created_at as createdAt,
+        t.qualification,
+        t.is_live,
+        COALESCE(
+          ARRAY_AGG(DISTINCT ts.subject_id) FILTER (WHERE ts.subject_id IS NOT NULL),
+          ARRAY[]::uuid[]
+        ) as subjects,
+        CASE WHEN tvt.id IS NOT NULL THEN true ELSE false END as is_top_verified,
+        COALESCE(tvt.position, 0) as top_position
+      FROM teachers t
+      JOIN users u ON t.user_id = u.id
+      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
+      LEFT JOIN top_verified_teachers tvt ON t.id = tvt.teacher_id
+      GROUP BY t.id, u.id, tvt.id
+      ORDER BY t.created_at DESC
+    `);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get teachers error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get teachers'
+    });
+  }
+});
+
+// @route   POST /api/admin/teachers/top/:id
+// @desc    Add teacher to top verified list
+// @access  Private/Admin
+router.post('/teachers/top/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { position } = req.body;
+
+    // Check if teacher exists and is verified
+    const teacherResult = await query(
+      "SELECT id FROM teachers WHERE id = $1 AND verification_status = 'approved'",
+      [id]
+    );
+
+    if (teacherResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Teacher not found or not verified'
+      });
+    }
+
+    // Check if already in top list
+    const existingResult = await query(
+      'SELECT id FROM top_verified_teachers WHERE teacher_id = $1',
+      [id]
+    );
+
+    if (existingResult.rows.length > 0) {
+      // Update position
+      await query(
+        'UPDATE top_verified_teachers SET position = $1 WHERE teacher_id = $2',
+        [position || 0, id]
+      );
+    } else {
+      // Add to top list
+      await query(
+        'INSERT INTO top_verified_teachers (teacher_id, position) VALUES ($1, $2)',
+        [id, position || 0]
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Teacher added to top verified list'
+    });
+  } catch (error) {
+    console.error('Add top teacher error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to add teacher to top list'
+    });
+  }
+});
+
+// @route   DELETE /api/admin/teachers/top/:id
+// @desc    Remove teacher from top verified list
+// @access  Private/Admin
+router.delete('/teachers/top/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    await query('DELETE FROM top_verified_teachers WHERE teacher_id = $1', [id]);
+
+    res.json({
+      success: true,
+      message: 'Teacher removed from top verified list'
+    });
+  } catch (error) {
+    console.error('Remove top teacher error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to remove teacher from top list'
+    });
+  }
+});
+
+// @route   GET /api/admin/teachers/top
+// @desc    Get top verified teachers
+// @access  Private/Admin
+router.get('/teachers/top', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT 
+        t.id,
+        t.user_id,
+        u.name as full_name,
+        u.name,
+        u.email,
+        u.profile_picture,
+        u.profile_picture as profilePicture,
+        t.bio,
+        t.verification_status,
+        tvt.position,
+        tvt.created_at as added_at
+      FROM top_verified_teachers tvt
+      JOIN teachers t ON tvt.teacher_id = t.id
+      JOIN users u ON t.user_id = u.id
+      ORDER BY tvt.position ASC, tvt.created_at ASC
+    `);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get top teachers error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get top teachers'
+    });
+  }
+});
+
+// @route   GET /api/admin/students
+// @desc    Get all students
+// @access  Private/Admin
+router.get('/students', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const result = await query(`
+      SELECT 
+        s.id,
+        s.user_id,
+        u.name as full_name,
+        u.name,
+        u.email,
+        u.profile_picture,
+        u.profile_picture as profilePicture,
+        u.created_at as joined_at,
+        s.grade_level,
+        s.parent_contact,
+        s.location,
+        s.created_at
+      FROM students s
+      JOIN users u ON s.user_id = u.id
+      ORDER BY s.created_at DESC
+    `);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get students error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get students'
+    });
+  }
+});
+
+// @route   GET /api/admin/classes
+// @desc    Get all classes (upcoming and completed)
+// @access  Private/Admin
+router.get('/classes', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { status } = req.query;
+    
+    let statusFilter = '';
+    const params = [];
+    
+    if (status === 'upcoming') {
+      statusFilter = "AND b.scheduled_date > NOW() AND b.status IN ('confirmed')";
+    } else if (status === 'completed') {
+      statusFilter = "AND (b.status = 'completed' OR b.scheduled_date <= NOW())";
+    } else if (status === 'pending') {
+      statusFilter = "AND b.status IN ('pending_payment', 'payment_under_review')";
+    }
+
+    const result = await query(`
+      SELECT 
+        b.id,
+        b.scheduled_date,
+        b.duration,
+        b.price_per_hour,
+        b.total_amount,
+        b.status,
+        b.meeting_link,
+        b.notes,
+        b.created_at,
+        su.name as student_name,
+        su.profile_picture as student_picture,
+        tu.name as teacher_name,
+        tu.profile_picture as teacher_picture,
+        s.name as subject_name,
+        s.id as subject_id
+      FROM bookings b
+      JOIN students st ON b.student_id = st.id
+      JOIN users su ON st.user_id = su.id
+      JOIN teachers t ON b.teacher_id = t.id
+      JOIN users tu ON t.user_id = tu.id
+      JOIN subjects s ON b.subject_id = s.id
+      WHERE 1=1 ${statusFilter}
+      ORDER BY b.scheduled_date DESC
+    `, params);
+
+    const upcoming = result.rows.filter(r => new Date(r.scheduled_date) > new Date());
+    const completed = result.rows.filter(r => new Date(r.scheduled_date) <= new Date());
+
+    res.json({
+      success: true,
+      data: {
+        all: result.rows,
+        upcoming: upcoming,
+        completed: completed,
+        pending: result.rows.filter(r => r.status === 'pending_payment' || r.status === 'payment_under_review')
+      },
+      counts: {
+        total: result.rows.length,
+        upcoming: upcoming.length,
+        completed: completed.length,
+        pending: result.rows.filter(r => r.status === 'pending_payment' || r.status === 'payment_under_review').length
+      }
+    });
+  } catch (error) {
+    console.error('Get classes error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get classes'
+    });
+  }
+});
+
+// @route   GET /api/admin/settings
+// @desc    Get site settings
+// @access  Private/Admin
+router.get('/settings', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM site_settings ORDER BY setting_key');
+    
+    const settings: Record<string, any> = {};
+    result.rows.forEach(row => {
+      if (row.setting_type === 'number') {
+        settings[row.setting_key] = parseFloat(row.setting_value);
+      } else if (row.setting_type === 'boolean') {
+        settings[row.setting_key] = row.setting_value === 'true';
+      } else {
+        settings[row.setting_key] = row.setting_value;
+      }
+    });
+
+    res.json({
+      success: true,
+      data: settings
+    });
+  } catch (error) {
+    console.error('Get settings error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get settings'
+    });
+  }
+});
+
+// @route   PUT /api/admin/settings
+// @desc    Update site settings
+// @access  Private/Admin
+router.put('/settings', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const settings = req.body;
+    
+    for (const [key, value] of Object.entries(settings)) {
+      await query(
+        `INSERT INTO site_settings (setting_key, setting_value, setting_type, updated_at) 
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (setting_key) DO UPDATE SET setting_value = $2, updated_at = NOW()`,
+        [key, String(value), typeof value === 'number' ? 'number' : 'string']
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Settings updated successfully'
+    });
+  } catch (error) {
+    console.error('Update settings error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update settings'
+    });
+  }
+});
+
 module.exports = router;
