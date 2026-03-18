@@ -380,21 +380,14 @@ router.get('/teachers', authenticate, requireAdmin, async (req, res) => {
         u.created_at as joined_at,
         t.bio,
         t.verification_status,
-        t.verification_notes,
+        t.is_live,
         t.created_at,
         t.created_at as createdAt,
-        t.qualification,
-        t.is_live,
-        COALESCE(
-          ARRAY_AGG(DISTINCT ts.subject_id) FILTER (WHERE ts.subject_id IS NOT NULL),
-          ARRAY[]::integer[]
-        ) as subjects,
+        ARRAY[]::integer[] as subjects,
         false as is_top_verified,
         0 as top_position
       FROM teachers t
       JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-      GROUP BY t.id, u.id
       ORDER BY t.created_at DESC
     `);
 
