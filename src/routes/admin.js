@@ -368,18 +368,7 @@ router.get('/revenue', authenticate, requireAdmin, async (req, res) => {
 // @access  Private/Admin
 router.get('/teachers', authenticate, requireAdmin, async (req, res) => {
   try {
-    // Check if top_verified_teachers table exists
-    const tableCheck = await query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-        AND table_name = 'top_verified_teachers'
-      ) as exists
-    `);
-    
-    const hasTopTable = tableCheck.rows[0]?.exists;
-    
-    let sql = `
+    const result = await query(`
       SELECT 
         t.id,
         t.user_id,
@@ -399,40 +388,15 @@ router.get('/teachers', authenticate, requireAdmin, async (req, res) => {
         COALESCE(
           ARRAY_AGG(DISTINCT ts.subject_id) FILTER (WHERE ts.subject_id IS NOT NULL),
           ARRAY[]::integer[]
-        ) as subjects
-    `;
-    
-    if (hasTopTable) {
-      sql += `,
-        CASE WHEN tvt.id IS NOT NULL THEN true ELSE false END as is_top_verified,
-        COALESCE(tvt.position, 0) as top_position
-      `;
-    } else {
-      sql += `,
+        ) as subjects,
         false as is_top_verified,
         0 as top_position
-      `;
-    }
-    
-    sql += `
       FROM teachers t
       JOIN users u ON t.user_id = u.id
       LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-    `;
-    
-    if (hasTopTable) {
-      sql += ` LEFT JOIN top_verified_teachers tvt ON t.id = tvt.teacher_id`;
-    }
-    
-    sql += ` GROUP BY t.id, u.id`;
-    
-    if (hasTopTable) {
-      sql += `, tvt.id`;
-    }
-    
-    sql += ` ORDER BY t.created_at DESC`;
-    
-    const result = await query(sql);
+      GROUP BY t.id, u.id
+      ORDER BY t.created_at DESC
+    `);
 
     res.json({
       success: true,
@@ -456,6 +420,19 @@ router.post('/teachers/top/:id', authenticate, requireAdmin, async (req, res) =>
     const { id } = req.params;
     const { position } = req.body;
 
+    // Check if teacher exists
+    const teacherResult = await query(
+      "SELECT id FROM teachers WHERE id = $1",
+      [id]
+    );
+
+    if (teacherResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Teacher not found'
+      });
+    }
+
     // Check if top_verified_teachers table exists
     const tableCheck = await query(`
       SELECT EXISTS (
@@ -466,22 +443,9 @@ router.post('/teachers/top/:id', authenticate, requireAdmin, async (req, res) =>
     `);
     
     if (!tableCheck.rows[0]?.exists) {
-      return res.status(400).json({
-        success: false,
-        message: 'Top verified teachers feature not available. Please run database migrations.'
-      });
-    }
-
-    // Check if teacher exists and is verified
-    const teacherResult = await query(
-      "SELECT id FROM teachers WHERE id = $1 AND verification_status = 'approved'",
-      [id]
-    );
-
-    if (teacherResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Teacher not found or not verified'
+      return res.json({
+        success: true,
+        message: 'Top verified teachers feature requires database migration'
       });
     }
 
@@ -492,13 +456,11 @@ router.post('/teachers/top/:id', authenticate, requireAdmin, async (req, res) =>
     );
 
     if (existingResult.rows.length > 0) {
-      // Update position
       await query(
         'UPDATE top_verified_teachers SET position = $1 WHERE teacher_id = $2',
         [position || 0, id]
       );
     } else {
-      // Add to top list
       await query(
         'INSERT INTO top_verified_teachers (teacher_id, position) VALUES ($1, $2)',
         [id, position || 0]

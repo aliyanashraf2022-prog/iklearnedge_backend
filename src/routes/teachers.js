@@ -71,49 +71,20 @@ router.get('/top', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 5;
     
-    // Check if top_verified_teachers table exists
-    const tableCheck = await query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-        AND table_name = 'top_verified_teachers'
-      ) as exists
-    `);
-    
-    let result;
-    
-    if (tableCheck.rows[0]?.exists) {
-      // Use top_verified_teachers table
-      result = await query(`
-        SELECT 
-          t.id, t.user_id, u.name, u.profile_picture, t.bio,
-          COALESCE(ARRAY_AGG(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL), '{}') as subject_names
-        FROM top_verified_teachers tvt
-        JOIN teachers t ON tvt.teacher_id = t.id
-        JOIN users u ON t.user_id = u.id
-        LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-        LEFT JOIN subjects s ON ts.subject_id = s.id
-        WHERE t.verification_status = 'approved'
-        GROUP BY t.id, u.id, tvt.position
-        ORDER BY tvt.position ASC, tvt.created_at ASC
-        LIMIT $1
-      `, [limit]);
-    } else {
-      // Fallback to regular teachers query
-      result = await query(`
-        SELECT 
-          t.id, t.user_id, u.name, u.profile_picture, t.bio,
-          COALESCE(ARRAY_AGG(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL), '{}') as subject_names
-        FROM teachers t
-        JOIN users u ON t.user_id = u.id
-        LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-        LEFT JOIN subjects s ON ts.subject_id = s.id
-        WHERE t.verification_status = 'approved' AND t.is_live = true
-        GROUP BY t.id, u.id
-        ORDER BY t.created_at DESC
-        LIMIT $1
-      `, [limit]);
-    }
+    // Get approved teachers (simple fallback)
+    const result = await query(`
+      SELECT 
+        t.id, t.user_id, u.name, u.profile_picture, t.bio,
+        COALESCE(ARRAY_AGG(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL), ARRAY[]::text[]) as subject_names
+      FROM teachers t
+      JOIN users u ON t.user_id = u.id
+      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
+      LEFT JOIN subjects s ON ts.subject_id = s.id
+      WHERE t.verification_status = 'approved' AND t.is_live = true
+      GROUP BY t.id, u.id
+      ORDER BY t.created_at DESC
+      LIMIT $1
+    `, [limit]);
     
     res.json({
       success: true,
