@@ -64,42 +64,6 @@ router.get('/', async (req, res) => {
   }
 });
 
-// @route   GET /api/teachers/top
-// @desc    Get top teachers (Public)
-// @access  Public
-router.get('/top', async (req, res) => {
-  try {
-    const limit = parseInt(req.query.limit) || 5;
-    
-    // Get approved teachers (simple fallback)
-    const result = await query(`
-      SELECT 
-        t.id, t.user_id, u.name, u.profile_picture, t.bio,
-        COALESCE(ARRAY_AGG(DISTINCT s.name) FILTER (WHERE s.name IS NOT NULL), ARRAY[]::text[]) as subject_names
-      FROM teachers t
-      JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-      LEFT JOIN subjects s ON ts.subject_id = s.id
-      WHERE t.verification_status = 'approved' AND t.is_live = true
-      GROUP BY t.id, u.id
-      ORDER BY t.created_at DESC
-      LIMIT $1
-    `, [limit]);
-    
-    res.json({
-      success: true,
-      count: result.rows.length,
-      data: result.rows
-    });
-  } catch (error) {
-    console.error('Get public top teachers error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get top teachers'
-    });
-  }
-});
-
 // @route   GET /api/teachers/all
 // @desc    Get all teachers (admin only)
 // @access  Private/Admin
@@ -365,6 +329,42 @@ router.put('/profile', authenticate, requireTeacher, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to update profile'
+    });
+  }
+});
+
+// @route   GET /api/teachers/availability
+// @desc    Get teacher availability
+// @access  Private/Teacher
+router.get('/availability', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const teacherResult = await query(
+      'SELECT id FROM teachers WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    if (teacherResult.rows.length === 0) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    const teacherId = teacherResult.rows[0].id;
+    const availabilityResult = await query(
+      'SELECT id, day, start_time as "startTime", end_time as "endTime", is_available as "isAvailable" FROM availability WHERE teacher_id = $1 ORDER BY day, start_time',
+      [teacherId]
+    );
+
+    res.json({
+      success: true,
+      data: availabilityResult.rows
+    });
+  } catch (error) {
+    console.error('Get availability error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get availability'
     });
   }
 });

@@ -148,7 +148,6 @@ router.post('/document', authenticate, upload.single('file'), async (req, res) =
     });
   }
 });
-
 // @route   POST /api/upload/payment-proof
 // @desc    Upload payment proof
 // @access  Private/Student
@@ -175,6 +174,14 @@ router.post('/payment-proof', authenticate, upload.single('file'), async (req, r
       'SELECT id FROM students WHERE user_id = $1',
       [req.user.id]
     );
+
+    if (!studentResult.rows.length) {
+      return res.status(403).json({
+        success: false,
+        message: 'Student profile not found'
+      });
+    }
+
     const studentId = studentResult.rows[0].id;
 
     const bookingResult = await query(
@@ -199,6 +206,20 @@ router.post('/payment-proof', authenticate, upload.single('file'), async (req, r
       public_id: `payment_${bookingId}_${Date.now()}`,
       resource_type: 'auto'
     });
+
+    // Save payment proof to database
+    await query(
+      `INSERT INTO payment_proofs (booking_id, file_url, public_id)
+       VALUES ($1, $2, $3)`,
+      [bookingId, result.secure_url, result.public_id]
+    );
+
+    // Update booking status to pending_payment
+    await query(
+      `UPDATE bookings SET status = 'pending_payment', updated_at = NOW()
+       WHERE id = $1`,
+      [bookingId]
+    );
 
     res.json({
       success: true,

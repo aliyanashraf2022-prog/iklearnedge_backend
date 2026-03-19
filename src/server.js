@@ -18,6 +18,7 @@ const adminRoutes = require('./routes/admin');
 const subjectRoutes = require('./routes/subjects');
 const uploadRoutes = require('./routes/upload');
 const settingsRoutes = require('./routes/settings');
+const notificationRoutes = require('./routes/notifications');
 
 // Initialize Express app
 const app = express();
@@ -77,6 +78,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/subjects', subjectRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Static files for uploads (in development)
 if (process.env.NODE_ENV === 'development') {

@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { query, transaction } = require('../models/database');
 const { authenticate, requireStudent, requireTeacher } = require('../middleware/auth');
+const { createNotification } = require('./notifications');
 
 const router = express.Router();
 
@@ -405,6 +406,396 @@ router.get('/upcoming/classes', authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to get upcoming classes'
+    });
+  }
+});
+
+// @route   GET /api/bookings/demo/requests
+// @desc    Get demo booking requests (for teachers)
+// @access  Private/Teacher
+router.get('/demo/requests', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const teacherResult = await query(
+      'SELECT id FROM teachers WHERE user_id = $1',
+      [req.user.id]
+    );
+    const teacherId = teacherResult.rows[0].id;
+
+    const sql = `
+      SELECT 
+        b.*,
+        u.name as student_name,
+        u.email as student_email,
+        u.profile_picture as student_picture,
+        s.name as subject_name
+      FROM bookings b
+      JOIN students st ON b.student_id = st.id
+      JOIN users u ON st.user_id = u.id
+      JOIN subjects s ON b.subject_id = s.id
+      WHERE b.teacher_id = $1 AND b.notes = 'demo'
+      ORDER BY b.created_at DESC
+    `;
+
+    const result = await query(sql, [teacherId]);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get demo requests error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get demo requests'
+    });
+  }
+});
+
+// @route   POST /api/bookings/demo
+// @desc    Create demo booking request
+// @access  Private/Student
+router.post('/demo', authenticate, requireStudent, [
+  body('teacherId').isInt(),
+  body('subjectId').isInt(),
+  body('scheduledDate').isISO8601()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array()
+      });
+    }
+
+    const { teacherId, subjectId, scheduledDate } = req.body;
+
+    // Get student ID
+    const studentResult = await query(
+      'SELECT id FROM students WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    if (studentResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found'
+      });
+    }
+
+    const studentId = studentResult.rows[0].id;
+
+    // Check if student already has a demo with this teacher
+    const existingDemo = await query(
+      `SELECT id FROM bookings 
+       WHERE student_id = $1 AND teacher_id = $2 AND notes = 'demo'`,
+      [studentId, teacherId]
+    );
+
+    if (existingDemo.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'You already have a pending or confirmed demo with this teacher'
+      });
+    }
+
+    // Create demo booking (free, no payment required)
+    // Note: Using 'pending_payment' status for demo bookings since they're free
+    // The notes field will contain 'demo' to identify demo bookings
+    const result = await query(`
+      INSERT INTO bookings (
+        student_id, teacher_id, subject_id, 
+        scheduled_date, duration, price_per_hour, total_amount,
+        status, notes
+      ) VALUES ($1, $2, $3, $4, 30, 0, 0, 'pending_payment', 'demo')
+      RETURNING *
+    `, [studentId, teacherId, subjectId, scheduledDate]);
+
+    // Get teacher's user_id for notification
+    const teacherUserResult = await query(
+      'SELECT user_id FROM teachers WHERE id = $1',
+      [teacherId]
+    );
+
+    // Get student name for notification
+    const studentUserResult = await query(
+      'SELECT name FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    // Get subject name
+    const subjectResult = await query(
+      'SELECT name FROM subjects WHERE id = $1',
+      [subjectId]
+    );
+
+    const studentName = studentUserResult.rows[0]?.name || 'A student';
+    const subjectName = subjectResult.rows[0]?.name || 'a subject';
+
+    // Notify the teacher
+    if (teacherUserResult.rows[0]?.user_id) {
+      await createNotification(
+        teacherUserResult.rows[0].user_id,
+        'New Demo Request',
+        `${studentName} requested a demo class for ${subjectName}`,
+        'demo_request'
+      );
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Demo request sent successfully!',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Create demo booking error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create demo booking'
+    });
+  }
+});
+
+// @route   PUT /api/bookings/:id/meeting
+// @desc    Accept demo and set meeting link
+// @access  Private/Teacher
+router.put('/:id/meeting', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { meetingLink } = req.body;
+
+    if (!meetingLink) {
+      return res.status(400).json({
+        success: false,
+        message: 'Meeting link is required'
+      });
+    }
+
+    // Verify teacher owns this booking
+    const teacherResult = await query(
+      'SELECT id FROM teachers WHERE user_id = $1',
+      [req.user.id]
+    );
+    const teacherId = teacherResult.rows[0].id;
+
+    const bookingResult = await query(
+      'SELECT id, status FROM bookings WHERE id = $1 AND teacher_id = $2',
+      [id, teacherId]
+    );
+
+    if (bookingResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found or not authorized'
+      });
+    }
+
+    const booking = bookingResult.rows[0];
+
+    // Only allow accepting demo bookings (pending_payment with notes='demo')
+    if (booking.status !== 'pending_payment' || booking.notes !== 'demo') {
+      return res.status(400).json({
+        success: false,
+        message: 'This booking cannot be accepted'
+      });
+    }
+
+    // Update booking with meeting link and confirm
+    const result = await query(`
+      UPDATE bookings 
+      SET meeting_link = $1, status = 'confirmed', updated_at = NOW()
+      WHERE id = $2
+      RETURNING *
+    `, [meetingLink, id]);
+
+    // Get student's user_id for notification
+    const bookingWithStudent = await query(`
+      SELECT b.*, st.user_id as student_user_id, u.name as teacher_name
+      FROM bookings b
+      JOIN students st ON b.student_id = st.id
+      JOIN teachers t ON b.teacher_id = t.id
+      JOIN users u ON t.user_id = u.id
+      WHERE b.id = $1
+    `, [id]);
+
+    const bookingData = bookingWithStudent.rows[0];
+
+    // Notify the student
+    if (bookingData?.student_user_id) {
+      await createNotification(
+        bookingData.student_user_id,
+        'Demo Class Confirmed!',
+        `Your demo class with ${bookingData.teacher_name} has been confirmed. Meeting link: ${meetingLink}`,
+        'confirmed'
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Demo confirmed! Meeting link has been shared with the student.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Update meeting link error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update meeting link'
+    });
+  }
+});
+
+// @route   PUT /api/bookings/:id/confirm
+// @desc    Confirm demo booking (alternative to meeting link)
+// @access  Private/Teacher
+router.put('/:id/confirm', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { meetingLink } = req.body;
+
+    // Verify teacher owns this booking
+    const teacherResult = await query(
+      'SELECT id FROM teachers WHERE user_id = $1',
+      [req.user.id]
+    );
+    const teacherId = teacherResult.rows[0].id;
+
+    const bookingResult = await query(
+      'SELECT id, status FROM bookings WHERE id = $1 AND teacher_id = $2',
+      [id, teacherId]
+    );
+
+    if (bookingResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found or not authorized'
+      });
+    }
+
+    const booking = bookingResult.rows[0];
+
+    // Only allow confirming demo bookings (pending_payment with notes='demo')
+    if (booking.status !== 'pending_payment' || booking.notes !== 'demo') {
+      return res.status(400).json({
+        success: false,
+        message: 'This booking cannot be confirmed'
+      });
+    }
+
+    // Update booking status
+    const updateData = meetingLink 
+      ? { status: 'confirmed', meeting_link: meetingLink }
+      : { status: 'confirmed' };
+
+    const result = await query(`
+      UPDATE bookings 
+      SET status = $1, meeting_link = COALESCE($2, meeting_link), updated_at = NOW()
+      WHERE id = $3
+      RETURNING *
+    `, [updateData.status, updateData.meeting_link, id]);
+
+    // Get student's user_id for notification
+    const bookingWithStudent = await query(`
+      SELECT b.*, st.user_id as student_user_id, u.name as teacher_name
+      FROM bookings b
+      JOIN students st ON b.student_id = st.id
+      JOIN teachers t ON b.teacher_id = t.id
+      JOIN users u ON t.user_id = u.id
+      WHERE b.id = $1
+    `, [id]);
+
+    const bookingData = bookingWithStudent.rows[0];
+
+    // Notify the student
+    if (bookingData?.student_user_id) {
+      await createNotification(
+        bookingData.student_user_id,
+        'Demo Class Confirmed!',
+        `Your demo class with ${bookingData.teacher_name} has been confirmed.`,
+        'confirmed'
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Demo booking confirmed!',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Confirm booking error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to confirm booking'
+    });
+  }
+});
+
+// @route   DELETE /api/bookings/:id/demo
+// @desc    Cancel demo booking
+// @access  Private
+router.delete('/:id/demo', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get booking and verify ownership
+    const bookingResult = await query(
+      'SELECT student_id, teacher_id, status, notes FROM bookings WHERE id = $1',
+      [id]
+    );
+
+    if (bookingResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    const booking = bookingResult.rows[0];
+
+    // Only allow cancelling demo bookings
+    if (booking.status !== 'pending_payment' || booking.notes !== 'demo') {
+      return res.status(400).json({
+        success: false,
+        message: 'This booking cannot be cancelled'
+      });
+    }
+
+    // Verify user is the student or teacher
+    let isAuthorized = false;
+    
+    if (req.user.role === 'student') {
+      const studentResult = await query(
+        'SELECT id FROM students WHERE user_id = $1',
+        [req.user.id]
+      );
+      isAuthorized = studentResult.rows.length > 0 && studentResult.rows[0].id === booking.student_id;
+    } else if (req.user.role === 'teacher') {
+      const teacherResult = await query(
+        'SELECT id FROM teachers WHERE user_id = $1',
+        [req.user.id]
+      );
+      isAuthorized = teacherResult.rows.length > 0 && teacherResult.rows[0].id === booking.teacher_id;
+    }
+
+    if (!isAuthorized) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized'
+      });
+    }
+
+    // Delete the demo booking
+    await query('DELETE FROM bookings WHERE id = $1', [id]);
+
+    res.json({
+      success: true,
+      message: 'Demo booking cancelled successfully'
+    });
+  } catch (error) {
+    console.error('Cancel demo booking error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to cancel demo booking'
     });
   }
 });
