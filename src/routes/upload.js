@@ -207,18 +207,11 @@ router.post('/payment-proof', authenticate, upload.single('file'), async (req, r
       resource_type: 'auto'
     });
 
-    // Save payment proof to database
+    // Update booking receipt_url and status to pending_admin
     await query(
-      `INSERT INTO payment_proofs (booking_id, file_url, public_id)
-       VALUES ($1, $2, $3)`,
-      [bookingId, result.secure_url, result.public_id]
-    );
-
-    // Update booking status to pending_payment
-    await query(
-      `UPDATE bookings SET status = 'pending_payment', updated_at = NOW()
-       WHERE id = $1`,
-      [bookingId]
+      `UPDATE bookings SET receipt_url = $1, status = 'pending_admin', updated_at = NOW()
+       WHERE id = $2`,
+      [result.secure_url, bookingId]
     );
 
     res.json({

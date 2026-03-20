@@ -584,7 +584,7 @@ router.post('/demo', authenticate, requireStudent, [
     // Check if student already has a demo with this teacher
     const existingDemo = await query(
       `SELECT id FROM bookings 
-       WHERE student_id = $1 AND teacher_id = $2 AND notes = 'demo'`,
+       WHERE student_id = $1 AND teacher_id = $2 AND is_demo = true AND status != 'cancelled'`,
       [studentId, teacherId]
     );
 
