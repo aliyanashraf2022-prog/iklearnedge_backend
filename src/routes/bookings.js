@@ -226,12 +226,13 @@ router.post('/', authenticate, requireStudent, [
     const meetingLink = teacherResult.rows[0]?.meeting_link || '';
 
     // Create booking
+    // Status: 'pending_admin' - admin needs to verify payment first
     const result = await query(`
       INSERT INTO bookings (
         student_id, teacher_id, subject_id, grade_level,
         scheduled_date, duration, price_per_hour, total_amount,
-        status, meeting_link, notes
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending_payment', $9, $10)
+        status, meeting_link, notes, is_demo
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending_admin', $9, $10, false)
       RETURNING *
     `, [studentId, teacherId, subjectId, gradeLevel, scheduledDate, duration, pricePerHour, totalAmount, meetingLink, notes || '']);
 
@@ -257,7 +258,13 @@ router.put('/:id/status', authenticate, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    const validStatuses = ['pending_payment', 'payment_under_review', 'confirmed', 'completed', 'cancelled'];
+    const validStatuses = [
+      'pending_admin',      // Paid booking - waiting for admin to verify payment
+      'pending_teacher',    // Demo or verified booking - waiting for teacher to accept
+      'accepted',           // Teacher accepted with meeting link
+      'completed',          // Class completed
+      'cancelled'          // Cancelled
+    ];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
@@ -302,8 +309,8 @@ router.put('/:id/status', authenticate, async (req, res) => {
         });
       }
 
-      // Teachers can only confirm/complete their own bookings
-      if (isTeacher && !['confirmed', 'completed'].includes(status)) {
+      // Teachers can only accept/complete their own bookings
+      if (isTeacher && !['accepted', 'completed'].includes(status)) {
         return res.status(403).json({
           success: false,
           message: 'Not authorized'
@@ -362,7 +369,7 @@ router.get('/upcoming/classes', authenticate, async (req, res) => {
         JOIN teachers t ON b.teacher_id = t.id
         JOIN users u ON t.user_id = u.id
         JOIN subjects s ON b.subject_id = s.id
-        WHERE b.student_id = $1 AND b.status = 'confirmed' AND b.scheduled_date > NOW()
+        WHERE b.student_id = $1 AND b.status = 'accepted' AND b.scheduled_date > NOW()
         ORDER BY b.scheduled_date ASC
       `;
       params = [studentId];
@@ -383,7 +390,7 @@ router.get('/upcoming/classes', authenticate, async (req, res) => {
         JOIN students st ON b.student_id = st.id
         JOIN users u ON st.user_id = u.id
         JOIN subjects s ON b.subject_id = s.id
-        WHERE b.teacher_id = $1 AND b.status = 'confirmed' AND b.scheduled_date > NOW()
+        WHERE b.teacher_id = $1 AND b.status = 'accepted' AND b.scheduled_date > NOW()
         ORDER BY b.scheduled_date ASC
       `;
       params = [teacherId];
@@ -432,7 +439,7 @@ router.get('/demo/requests', authenticate, requireTeacher, async (req, res) => {
       JOIN students st ON b.student_id = st.id
       JOIN users u ON st.user_id = u.id
       JOIN subjects s ON b.subject_id = s.id
-      WHERE b.teacher_id = $1 AND b.notes = 'demo'
+      WHERE b.teacher_id = $1 AND b.is_demo = true
       ORDER BY b.created_at DESC
     `;
 
@@ -448,6 +455,94 @@ router.get('/demo/requests', authenticate, requireTeacher, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to get demo requests'
+    });
+  }
+});
+
+// @route   GET /api/bookings/pending-admin
+// @desc    Get bookings pending admin verification
+// @access  Private/Admin
+router.get('/pending-admin', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can access this'
+      });
+    }
+
+    const sql = `
+      SELECT 
+        b.*,
+        su.name as student_name,
+        su.email as student_email,
+        tu.name as teacher_name,
+        tu.email as teacher_email,
+        s.name as subject_name
+      FROM bookings b
+      JOIN students st ON b.student_id = st.id
+      JOIN users su ON st.user_id = su.id
+      JOIN teachers t ON b.teacher_id = t.id
+      JOIN users tu ON t.user_id = tu.id
+      JOIN subjects s ON b.subject_id = s.id
+      WHERE b.status = 'pending_admin'
+      ORDER BY b.created_at DESC
+    `;
+
+    const result = await query(sql);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get pending admin bookings error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get pending admin bookings'
+    });
+  }
+});
+
+// @route   GET /api/bookings/teacher
+// @desc    Get all bookings for a teacher
+// @access  Private/Teacher
+router.get('/teacher', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const teacherResult = await query(
+      'SELECT id FROM teachers WHERE user_id = $1',
+      [req.user.id]
+    );
+    const teacherId = teacherResult.rows[0].id;
+
+    const sql = `
+      SELECT 
+        b.*,
+        u.name as student_name,
+        u.email as student_email,
+        u.profile_picture as student_picture,
+        s.name as subject_name
+      FROM bookings b
+      JOIN students st ON b.student_id = st.id
+      JOIN users u ON st.user_id = u.id
+      JOIN subjects s ON b.subject_id = s.id
+      WHERE b.teacher_id = $1
+      ORDER BY b.created_at DESC
+    `;
+
+    const result = await query(sql, [teacherId]);
+
+    res.json({
+      success: true,
+      count: result.rows.length,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Get teacher bookings error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get teacher bookings'
     });
   }
 });
@@ -501,14 +596,14 @@ router.post('/demo', authenticate, requireStudent, [
     }
 
     // Create demo booking (free, no payment required)
-    // Note: Using 'pending_payment' status for demo bookings since they're free
-    // The notes field will contain 'demo' to identify demo bookings
+    // Status: 'pending_teacher' - teacher needs to accept
+    // is_demo: true - identifies as demo class
     const result = await query(`
       INSERT INTO bookings (
         student_id, teacher_id, subject_id, 
         scheduled_date, duration, price_per_hour, total_amount,
-        status, notes
-      ) VALUES ($1, $2, $3, $4, 30, 0, 0, 'pending_payment', 'demo')
+        status, notes, is_demo
+      ) VALUES ($1, $2, $3, $4, 30, 0, 0, 'pending_teacher', 'demo', true)
       RETURNING *
     `, [studentId, teacherId, subjectId, scheduledDate]);
 
@@ -593,18 +688,18 @@ router.put('/:id/meeting', authenticate, requireTeacher, async (req, res) => {
 
     const booking = bookingResult.rows[0];
 
-    // Only allow accepting demo bookings (pending_payment with notes='demo')
-    if (booking.status !== 'pending_payment' || booking.notes !== 'demo') {
+    // Only allow accepting bookings in pending_teacher status
+    if (booking.status !== 'pending_teacher') {
       return res.status(400).json({
         success: false,
         message: 'This booking cannot be accepted'
       });
     }
 
-    // Update booking with meeting link and confirm
+    // Update booking with meeting link and set status to 'accepted'
     const result = await query(`
       UPDATE bookings 
-      SET meeting_link = $1, status = 'confirmed', updated_at = NOW()
+      SET meeting_link = $1, status = 'accepted', updated_at = NOW()
       WHERE id = $2
       RETURNING *
     `, [meetingLink, id]);
@@ -625,9 +720,9 @@ router.put('/:id/meeting', authenticate, requireTeacher, async (req, res) => {
     if (bookingData?.student_user_id) {
       await createNotification(
         bookingData.student_user_id,
-        'Demo Class Confirmed!',
-        `Your demo class with ${bookingData.teacher_name} has been confirmed. Meeting link: ${meetingLink}`,
-        'confirmed'
+        'Class Accepted!',
+        `Your class with ${bookingData.teacher_name} has been accepted. Meeting link: ${meetingLink}`,
+        'accepted'
       );
     }
 
@@ -730,16 +825,25 @@ router.put('/:id/confirm', authenticate, requireTeacher, async (req, res) => {
   }
 });
 
-// @route   DELETE /api/bookings/:id/demo
-// @desc    Cancel demo booking
-// @access  Private
-router.delete('/:id/demo', authenticate, async (req, res) => {
+// @route   PUT /api/bookings/:id/verify-payment
+// @desc    Admin verifies payment and moves booking to pending_teacher
+// @access  Private/Admin
+router.put('/:id/verify-payment', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
+    const { receiptUrl } = req.body;
 
-    // Get booking and verify ownership
+    // Verify admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admins can verify payments'
+      });
+    }
+
+    // Get booking
     const bookingResult = await query(
-      'SELECT student_id, teacher_id, status, notes FROM bookings WHERE id = $1',
+      'SELECT * FROM bookings WHERE id = $1',
       [id]
     );
 
@@ -752,11 +856,89 @@ router.delete('/:id/demo', authenticate, async (req, res) => {
 
     const booking = bookingResult.rows[0];
 
-    // Only allow cancelling demo bookings
-    if (booking.status !== 'pending_payment' || booking.notes !== 'demo') {
+    // Only allow verifying pending_admin bookings
+    if (booking.status !== 'pending_admin') {
       return res.status(400).json({
         success: false,
-        message: 'This booking cannot be cancelled'
+        message: 'This booking is not pending payment verification'
+      });
+    }
+
+    // Update booking
+    const updateData = {
+      status: 'pending_teacher',
+      receipt_url: receiptUrl || booking.receipt_url
+    };
+
+    const result = await query(`
+      UPDATE bookings 
+      SET status = $1, receipt_url = $2, updated_at = NOW()
+      WHERE id = $3
+      RETURNING *
+    `, [updateData.status, updateData.receipt_url, id]);
+
+    // Get teacher user_id for notification
+    const teacherResult = await query(`
+      SELECT t.user_id as teacher_user_id, u.name as teacher_name
+      FROM bookings b
+      JOIN teachers t ON b.teacher_id = t.id
+      JOIN users u ON t.user_id = u.id
+      WHERE b.id = $1
+    `, [id]);
+
+    const teacherData = teacherResult.rows[0];
+
+    // Notify teacher
+    if (teacherData?.teacher_user_id) {
+      await createNotification(
+        teacherData.teacher_user_id,
+        'Payment Verified!',
+        `Your booking has been verified. Please add a meeting link to confirm.`,
+        'payment_verified'
+      );
+    }
+
+    res.json({
+      success: true,
+      message: 'Payment verified! Booking moved to teacher for confirmation.',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Verify payment error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to verify payment'
+    });
+  }
+});
+
+// @route   DELETE /api/bookings/:id/demo
+// @desc    Cancel demo booking
+// @access  Private
+router.delete('/:id/demo', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get booking and verify ownership
+    const bookingResult = await query(
+      'SELECT student_id, teacher_id, status, is_demo FROM bookings WHERE id = $1',
+      [id]
+    );
+
+    if (bookingResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    const booking = bookingResult.rows[0];
+
+    // Only allow cancelling demo bookings in pending_teacher status
+    if (booking.status !== 'pending_teacher' || booking.is_demo !== true) {
+      return res.status(400).json({
+        success: false,
+        message: 'This demo booking cannot be cancelled'
       });
     }
 
@@ -784,8 +966,11 @@ router.delete('/:id/demo', authenticate, async (req, res) => {
       });
     }
 
-    // Delete the demo booking
-    await query('DELETE FROM bookings WHERE id = $1', [id]);
+    // Update status to cancelled
+    await query(
+      `UPDATE bookings SET status = 'cancelled', updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
 
     res.json({
       success: true,
