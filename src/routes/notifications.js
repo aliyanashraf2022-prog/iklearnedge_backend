@@ -1,6 +1,7 @@
 const express = require('express');
 const { query } = require('../models/database');
 const { authenticate } = require('../middleware/auth');
+const { normalizeNotificationType } = require('../utils/workflow');
 
 const router = express.Router();
 
@@ -145,7 +146,7 @@ router.post('/', authenticate, async (req, res) => {
       INSERT INTO notifications (user_id, title, message, type)
       VALUES ($1, $2, $3, $4)
       RETURNING *
-    `, [userId, title, message, type || 'info']);
+    `, [userId, title, message, normalizeNotificationType(type)]);
 
     res.status(201).json({
       success: true,
@@ -166,7 +167,7 @@ const createNotification = async (userId, title, message, type) => {
     await query(`
       INSERT INTO notifications (user_id, title, message, type)
       VALUES ($1, $2, $3, $4)
-    `, [userId, title, message, type || 'info']);
+    `, [userId, title, message, normalizeNotificationType(type)]);
   } catch (error) {
     console.error('Auto notification error:', error);
   }

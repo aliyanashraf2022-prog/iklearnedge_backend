@@ -28,6 +28,8 @@ const BOOKING_NOTE_MARKERS = Object.freeze({
   CANCELLED: '[system:cancelled]',
 });
 
+const SAFE_NOTIFICATION_TYPES = new Set(['info', 'success', 'warning', 'error']);
+
 const GRADE_LEVEL_NORMALIZATION = Object.freeze({
   'grade 1': 'Grade 1-5 (Primary)',
   'grade 2': 'Grade 1-5 (Primary)',
@@ -127,6 +129,28 @@ const getGradeCandidates = (value) => {
 
 const hasMarker = (notes, marker) => String(notes || '').includes(marker);
 
+const normalizeNotificationType = (value) => {
+  const normalized = String(value || 'info').trim().toLowerCase();
+
+  if (SAFE_NOTIFICATION_TYPES.has(normalized)) {
+    return normalized;
+  }
+
+  if (/(rejected|cancelled|canceled|failed|error)/.test(normalized)) {
+    return 'error';
+  }
+
+  if (/(accepted|approved|completed|verified|verification|success)/.test(normalized)) {
+    return 'success';
+  }
+
+  if (/(pending|review|request)/.test(normalized)) {
+    return 'warning';
+  }
+
+  return 'info';
+};
+
 const getApiBookingStatus = (row) => {
   const dbStatus = row?.dbStatus || row?.status || '';
   const paymentStatus = row?.paymentStatus || '';
@@ -180,7 +204,7 @@ const createNotification = async (client, userId, title, message, type = 'info')
     client,
     `INSERT INTO notifications (user_id, title, message, type)
      VALUES ($1, $2, $3, $4)`,
-    [userId, title, message, type],
+    [userId, title, message, normalizeNotificationType(type)],
   );
 };
 
@@ -341,6 +365,7 @@ module.exports = {
   getTeacherProfile,
   getTeacherSubjects,
   normalizeGradeLevel,
+  normalizeNotificationType,
   requireTeacherSubject,
   run,
   toBookingPayload,
