@@ -1,521 +1,478 @@
-// ...existing code...
 const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { query, transaction } = require('../models/database');
-const { authenticate, requireTeacher, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireTeacher } = require('../middleware/auth');
+const {
+  createNotification,
+  getTeacherAvailability,
+  getTeacherDocuments,
+  getTeacherProfile,
+  getTeacherSubjects,
+} = require('../utils/workflow');
 
 const router = express.Router();
 
-// @route   GET /api/teachers
-// @desc    Get public list of approved and live teachers (optional filters)
-// @access  Public
+const validate = (rules) => [
+  ...rules,
+  (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array(),
+      });
+    }
+    return next();
+  },
+];
+
+const getTeacherBase = async (teacherId) => {
+  const result = await query(
+    `SELECT
+       t.id,
+       t.user_id AS "userId",
+       t.bio,
+       t.verification_status AS "verificationStatus",
+       t.is_live AS "isLive",
+       t.meeting_link AS "meetingLink",
+       t.verification_notes AS "verificationNotes",
+       t.created_at AS "createdAt",
+       t.updated_at AS "updatedAt",
+       u.name,
+       u.email,
+       u.profile_picture AS "profilePicture"
+     FROM teachers t
+     JOIN users u ON t.user_id = u.id
+     WHERE t.id = $1`,
+    [teacherId],
+  );
+  return result.rows[0] || null;
+};
+
+const buildTeacherPayload = async (teacherId) => {
+  const teacher = await getTeacherBase(teacherId);
+  if (!teacher) {
+    return null;
+  }
+
+  const [subjects, availability, documents] = await Promise.all([
+    getTeacherSubjects(teacherId),
+    getTeacherAvailability(teacherId),
+    getTeacherDocuments(teacherId),
+  ]);
+
+  const highestDegree = documents.find((item) => item.type === 'degree') || null;
+  const identityDocument = documents.find((item) => item.type === 'identity') || null;
+  const teachingCertificates = documents.filter((item) => item.type === 'certificate');
+
+  return {
+    ...teacher,
+    subjects,
+    availability,
+    documents,
+    highestDegree,
+    identityDocument,
+    teachingCertificates,
+  };
+};
+
 router.get('/', async (req, res) => {
   try {
     const { subject, search } = req.query;
-
-    let sql = `
-      SELECT 
-        t.id,
-        t.user_id,
-        u.name,
-        u.email,
-        u.profile_picture as "profilePicture",
-        t.bio,
-        t.is_live as "isLive",
-        t.verification_status as "verificationStatus",
-        COALESCE(ARRAY_AGG(DISTINCT s.id) FILTER (WHERE s.id IS NOT NULL), '{}') as subjects
-      FROM teachers t
-      JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-      LEFT JOIN subjects s ON ts.subject_id = s.id
-      WHERE t.is_live = true AND t.verification_status = 'approved'
-    `;
-
     const params = [];
-    let paramCount = 1;
+    const filters = [
+      `t.is_live = true`,
+      `t.verification_status = 'approved'`,
+    ];
 
     if (subject) {
-      sql += ` AND s.id = $${paramCount}`;
       params.push(subject);
-      paramCount++;
+      filters.push(`EXISTS (
+        SELECT 1
+        FROM teacher_subjects ts
+        WHERE ts.teacher_id = t.id AND ts.subject_id = $${params.length}
+      )`);
     }
 
     if (search) {
-      sql += ` AND (u.name ILIKE $${paramCount} OR t.bio ILIKE $${paramCount})`;
       params.push(`%${search}%`);
-      paramCount++;
+      filters.push(`(u.name ILIKE $${params.length} OR COALESCE(t.bio, '') ILIKE $${params.length})`);
     }
 
-    sql += ` GROUP BY t.id, u.id ORDER BY u.name`;
+    const result = await query(
+      `SELECT
+         t.id,
+         t.user_id AS "userId",
+         t.bio,
+         t.verification_status AS "verificationStatus",
+         t.is_live AS "isLive",
+         t.meeting_link AS "meetingLink",
+         t.created_at AS "createdAt",
+         t.updated_at AS "updatedAt",
+         u.name,
+         u.email,
+         u.profile_picture AS "profilePicture"
+       FROM teachers t
+       JOIN users u ON t.user_id = u.id
+       WHERE ${filters.join(' AND ')}
+       ORDER BY u.name`,
+      params,
+    );
 
-    const result = await query(sql, params);
+    const teachers = await Promise.all(
+      result.rows.map(async (teacher) => ({
+        ...teacher,
+        subjects: await getTeacherSubjects(teacher.id),
+        availability: await getTeacherAvailability(teacher.id),
+      })),
+    );
 
-    res.json({
+    return res.json({
       success: true,
-      count: result.rows.length,
-      data: result.rows
+      count: teachers.length,
+      data: teachers,
     });
   } catch (error) {
     console.error('Get public teachers error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get teachers'
+      message: 'Failed to get teachers',
     });
   }
 });
 
-// @route   GET /api/teachers/all
-// @desc    Get all teachers (admin only)
-// @access  Private/Admin
 router.get('/all', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { subject, search } = req.query;
+    const result = await query(
+      `SELECT
+         t.id,
+         t.user_id AS "userId",
+         t.bio,
+         t.verification_status AS "verificationStatus",
+         t.is_live AS "isLive",
+         t.meeting_link AS "meetingLink",
+         t.verification_notes AS "verificationNotes",
+         t.created_at AS "createdAt",
+         t.updated_at AS "updatedAt",
+         u.name,
+         u.email,
+         u.profile_picture AS "profilePicture"
+       FROM teachers t
+       JOIN users u ON t.user_id = u.id
+       ORDER BY t.created_at DESC`,
+    );
 
-    let sql = `
-      SELECT 
-        t.id, t.user_id, u.name, u.email, u.profile_picture,
-        t.bio, t.verification_status, t.is_live, t.meeting_link,
-        ARRAY_AGG(DISTINCT s.name) as subject_names,
-        ARRAY_AGG(DISTINCT s.id) as subject_ids
-      FROM teachers t
-      JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-      LEFT JOIN subjects s ON ts.subject_id = s.id
-      WHERE t.is_live = true AND t.verification_status = 'approved'
-    `;
+    const teachers = await Promise.all(
+      result.rows.map(async (teacher) => ({
+        ...teacher,
+        subjects: await getTeacherSubjects(teacher.id),
+      })),
+    );
 
-    const params = [];
-    let paramCount = 1;
-
-    if (subject) {
-      sql += ` AND ts.subject_id = $${paramCount}`;
-      params.push(subject);
-      paramCount++;
-    }
-
-    if (search) {
-      sql += ` AND (u.name ILIKE $${paramCount} OR t.bio ILIKE $${paramCount})`;
-      params.push(`%${search}%`);
-      paramCount++;
-    }
-
-    sql += ` GROUP BY t.id, u.id ORDER BY u.name`;
-
-    const result = await query(sql, params);
-
-    res.json({
+    return res.json({
       success: true,
-      count: result.rows.length,
-      data: result.rows
-    });
-  } catch (error) {
-    console.error('Get teachers error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get teachers'
-    });
-  }
-});
-
-// @route   GET /api/teachers/all
-// @desc    Get all teachers (admin only)
-// @access  Private/Admin
-router.get('/all', authenticate, requireAdmin, async (req, res) => {
-  try {
-    const result = await query(`
-      SELECT 
-        t.id,
-        t.user_id,
-        u.name,
-        u.email,
-        u.profile_picture,
-        t.bio,
-        t.verification_status,
-        t.is_live,
-        t.meeting_link,
-        t.verification_notes,
-        t.created_at,
-        ARRAY_AGG(DISTINCT s.name) as subject_names
-      FROM teachers t
-      JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-      LEFT JOIN subjects s ON ts.subject_id = s.id
-      GROUP BY t.id, u.id
-      ORDER BY t.created_at DESC
-    `);
-
-    res.json({
-      success: true,
-      count: result.rows.length,
-      data: result.rows
+      count: teachers.length,
+      data: teachers,
     });
   } catch (error) {
     console.error('Get all teachers error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get teachers'
+      message: 'Failed to get teachers',
     });
   }
 });
 
-// @route   GET /api/teachers/profile
-// @desc    Get current teacher profile
-// @access  Private/Teacher
 router.get('/profile', authenticate, requireTeacher, async (req, res) => {
   try {
-    const result = await query(`
-      SELECT 
-        t.id, t.user_id, u.name, u.email, u.profile_picture,
-        t.bio, t.verification_status, t.is_live, t.meeting_link,
-        ARRAY_AGG(DISTINCT jsonb_build_object(
-          'id', s.id,
-          'name', s.name
-        )) as subjects
-      FROM teachers t
-      JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-      LEFT JOIN subjects s ON ts.subject_id = s.id
-      WHERE t.user_id = $1
-      GROUP BY t.id, u.id
-    `, [req.user.id]);
-
-    if (result.rows.length === 0) {
+    const teacher = await getTeacherProfile(req.user.id);
+    if (!teacher) {
       return res.status(404).json({
         success: false,
-        message: 'Teacher profile not found'
+        message: 'Teacher profile not found',
       });
     }
 
-    // Get availability
-    const availabilityResult = await query(
-      'SELECT id, day, start_time, end_time, is_available FROM availability WHERE teacher_id = $1',
-      [result.rows[0].id]
-    );
+    const payload = await buildTeacherPayload(teacher.id);
 
-    // Get documents
-    const documentsResult = await query(
-      'SELECT id, type, file_url, file_name FROM documents WHERE teacher_id = $1',
-      [result.rows[0].id]
-    );
-
-    res.json({
+    return res.json({
       success: true,
-      data: {
-        ...result.rows[0],
-        availability: availabilityResult.rows,
-        documents: documentsResult.rows
-      }
+      data: payload,
     });
   } catch (error) {
     console.error('Get teacher profile error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get teacher profile'
+      message: 'Failed to get teacher profile',
     });
   }
 });
 
-// @route   GET /api/teachers/:id
-// @desc    Get teacher by ID
-// @access  Public
-router.get('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await query(`
-      SELECT 
-        t.id, t.user_id, u.name, u.email, u.profile_picture,
-        t.bio, t.verification_status, t.is_live, t.meeting_link,
-        ARRAY_AGG(DISTINCT jsonb_build_object(
-          'id', s.id,
-          'name', s.name
-        )) as subjects
-      FROM teachers t
-      JOIN users u ON t.user_id = u.id
-      LEFT JOIN teacher_subjects ts ON t.id = ts.teacher_id
-      LEFT JOIN subjects s ON ts.subject_id = s.id
-      WHERE t.id = $1 AND t.is_live = true
-      GROUP BY t.id, u.id
-    `, [id]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Teacher not found'
-      });
-    }
-
-    // Get availability
-    const availabilityResult = await query(
-      'SELECT id, day, start_time, end_time, is_available FROM availability WHERE teacher_id = $1',
-      [id]
-    );
-
-    res.json({
-      success: true,
-      data: {
-        ...result.rows[0],
-        availability: availabilityResult.rows
+router.put(
+  '/profile',
+  authenticate,
+  requireTeacher,
+  validate([
+    body('bio').optional().isString(),
+    body('meetingLink').optional({ nullable: true }).isURL({ require_protocol: true }),
+  ]),
+  async (req, res) => {
+    try {
+      const teacher = await getTeacherProfile(req.user.id);
+      if (!teacher) {
+        return res.status(404).json({
+          success: false,
+          message: 'Teacher profile not found',
+        });
       }
-    });
-  } catch (error) {
-    console.error('Get teacher error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get teacher'
-    });
-  }
-});
 
-// @route   PUT /api/teachers/profile
-// @desc    Update teacher profile
-// @access  Private/Teacher
-router.put('/profile', authenticate, requireTeacher, async (req, res) => {
-  try {
-    const { bio, meetingLink } = req.body;
+      const { bio, meetingLink } = req.body;
+      const updates = [];
+      const values = [];
 
-    // Get teacher ID
-    const teacherResult = await query(
-      'SELECT id FROM teachers WHERE user_id = $1',
-      [req.user.id]
-    );
+      if (bio !== undefined) {
+        values.push(bio);
+        updates.push(`bio = $${values.length}`);
+      }
 
-    if (teacherResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Teacher not found'
-      });
-    }
+      if (meetingLink !== undefined) {
+        values.push(meetingLink || null);
+        updates.push(`meeting_link = $${values.length}`);
+      }
 
-    const teacherId = teacherResult.rows[0].id;
+      if (!updates.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'No fields to update',
+        });
+      }
 
-    const updates = [];
-    const values = [];
-    let paramCount = 1;
+      values.push(teacher.id);
 
-    if (bio !== undefined) {
-      updates.push(`bio = $${paramCount}`);
-      values.push(bio);
-      paramCount++;
-    }
+      await query(
+        `UPDATE teachers
+         SET ${updates.join(', ')}, updated_at = NOW()
+         WHERE id = $${values.length}`,
+        values,
+      );
 
-    if (meetingLink !== undefined) {
-      updates.push(`meeting_link = $${paramCount}`);
-      values.push(meetingLink);
-      paramCount++;
-    }
+      const payload = await buildTeacherPayload(teacher.id);
 
-    if (updates.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No fields to update'
-      });
-    }
-
-    values.push(teacherId);
-
-    await query(
-      `UPDATE teachers SET ${updates.join(', ')}, updated_at = NOW()
-       WHERE id = $${paramCount}`,
-      values
-    );
-
-    res.json({
-      success: true,
-      message: 'Profile updated successfully'
-    });
-  } catch (error) {
-    console.error('Update teacher profile error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update profile'
-    });
-  }
-});
-
-// @route   GET /api/teachers/availability
-// @desc    Get teacher availability
-// @access  Private/Teacher
-router.get('/availability', authenticate, requireTeacher, async (req, res) => {
-  try {
-    const teacherResult = await query(
-      'SELECT id FROM teachers WHERE user_id = $1',
-      [req.user.id]
-    );
-
-    if (teacherResult.rows.length === 0) {
       return res.json({
         success: true,
-        data: []
+        message: 'Profile updated successfully',
+        data: payload,
+      });
+    } catch (error) {
+      console.error('Update teacher profile error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update profile',
+      });
+    }
+  },
+);
+
+router.get('/availability', authenticate, requireTeacher, async (req, res) => {
+  try {
+    const teacher = await getTeacherProfile(req.user.id);
+    if (!teacher) {
+      return res.json({
+        success: true,
+        data: [],
       });
     }
 
-    const teacherId = teacherResult.rows[0].id;
-    const availabilityResult = await query(
-      'SELECT id, day, start_time as "startTime", end_time as "endTime", is_available as "isAvailable" FROM availability WHERE teacher_id = $1 ORDER BY day, start_time',
-      [teacherId]
-    );
+    const availability = await getTeacherAvailability(teacher.id);
 
-    res.json({
+    return res.json({
       success: true,
-      data: availabilityResult.rows
+      data: availability,
     });
   } catch (error) {
     console.error('Get availability error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get availability'
+      message: 'Failed to get availability',
     });
   }
 });
 
-// @route   PUT /api/teachers/availability
-// @desc    Update teacher availability
-// @access  Private/Teacher
-router.put('/availability', authenticate, requireTeacher, async (req, res) => {
-  try {
-    const { availability } = req.body;
-
-    if (!availability || !Array.isArray(availability)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Availability array is required'
-      });
-    }
-
-    // Get teacher ID
-    const teacherResult = await query(
-      'SELECT id FROM teachers WHERE user_id = $1',
-      [req.user.id]
-    );
-
-    if (teacherResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Teacher not found'
-      });
-    }
-
-    const teacherId = teacherResult.rows[0].id;
-
-    await transaction(async (client) => {
-      // Delete existing availability
-      await client.query(
-        'DELETE FROM availability WHERE teacher_id = $1',
-        [teacherId]
-      );
-
-      // Insert new availability
-      for (const slot of availability) {
-        await client.query(
-          `INSERT INTO availability (teacher_id, day, start_time, end_time, is_available)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [teacherId, slot.day, slot.startTime, slot.endTime, slot.isAvailable]
-        );
+router.put(
+  '/availability',
+  authenticate,
+  requireTeacher,
+  validate([
+    body('availability').isArray(),
+    body('availability.*.day').isString(),
+    body('availability.*.startTime').isString(),
+    body('availability.*.endTime').isString(),
+    body('availability.*.isAvailable').optional().isBoolean(),
+  ]),
+  async (req, res) => {
+    try {
+      const teacher = await getTeacherProfile(req.user.id);
+      if (!teacher) {
+        return res.status(404).json({
+          success: false,
+          message: 'Teacher profile not found',
+        });
       }
-    });
 
-    res.json({
-      success: true,
-      message: 'Availability updated successfully'
-    });
-  } catch (error) {
-    console.error('Update availability error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update availability'
-    });
-  }
-});
+      const { availability } = req.body;
 
-// @route   PUT /api/teachers/:id/verify
-// @desc    Verify/reject teacher - Admin only
-// @access  Private/Admin
-router.put('/:id/verify', authenticate, requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status, notes } = req.body;
+      await transaction(async (client) => {
+        await client.query('DELETE FROM availability WHERE teacher_id = $1', [teacher.id]);
 
-    if (!['approved', 'rejected'].includes(status)) {
-      return res.status(400).json({
+        for (const slot of availability) {
+          await client.query(
+            `INSERT INTO availability (teacher_id, day, start_time, end_time, is_available)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [
+              teacher.id,
+              slot.day,
+              slot.startTime,
+              slot.endTime,
+              slot.isAvailable !== false,
+            ],
+          );
+        }
+      });
+
+      const updatedAvailability = await getTeacherAvailability(teacher.id);
+
+      return res.json({
+        success: true,
+        message: 'Availability updated successfully',
+        data: updatedAvailability,
+      });
+    } catch (error) {
+      console.error('Update availability error:', error);
+      return res.status(500).json({
         success: false,
-        message: 'Status must be approved or rejected'
+        message: 'Failed to update availability',
       });
     }
+  },
+);
 
-    const result = await query(
-      `UPDATE teachers 
-       SET verification_status = $1, 
-           verification_notes = $2,
-           is_live = $3,
-           updated_at = NOW()
-       WHERE id = $4
-       RETURNING *`,
-      [status, notes || '', status === 'approved', id]
-    );
+router.put(
+  '/:id/verify',
+  authenticate,
+  requireAdmin,
+  validate([
+    body('status').isIn(['approved', 'rejected']),
+    body('notes').optional().isString(),
+  ]),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, notes } = req.body;
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({
+      const teacher = await getTeacherBase(id);
+      if (!teacher) {
+        return res.status(404).json({
+          success: false,
+          message: 'Teacher not found',
+        });
+      }
+
+      await transaction(async (client) => {
+        await client.query(
+          `UPDATE teachers
+           SET verification_status = $1,
+               verification_notes = $2,
+               is_live = $3,
+               updated_at = NOW()
+           WHERE id = $4`,
+          [status, notes || '', status === 'approved', id],
+        );
+
+        await createNotification(
+          client,
+          teacher.userId,
+          status === 'approved' ? 'Teacher profile approved' : 'Teacher profile rejected',
+          status === 'approved'
+            ? 'Your teacher profile has been approved and is now live.'
+            : (notes
+              ? `Your teacher profile was rejected: ${notes}`
+              : 'Your teacher profile was rejected.'),
+          'teacher_verification',
+        );
+      });
+
+      const payload = await buildTeacherPayload(id);
+
+      return res.json({
+        success: true,
+        message: `Teacher ${status} successfully`,
+        data: payload,
+      });
+    } catch (error) {
+      console.error('Verify teacher error:', error);
+      return res.status(500).json({
         success: false,
-        message: 'Teacher not found'
+        message: 'Failed to verify teacher',
       });
     }
+  },
+);
 
-    res.json({
-      success: true,
-      message: `Teacher ${status} successfully`,
-      data: result.rows[0]
-    });
-  } catch (error) {
-    console.error('Verify teacher error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to verify teacher'
-    });
-  }
-});
-
-// @route   GET /api/teachers/:id/documents
-// @desc    Get teacher documents
-// @access  Private/Admin or Owner
 router.get('/:id/documents', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
+    const teacher = await getTeacherBase(id);
 
-    // Check if user is admin or the teacher themselves
-    const teacherResult = await query(
-      'SELECT user_id FROM teachers WHERE id = $1',
-      [id]
-    );
-
-    if (teacherResult.rows.length === 0) {
+    if (!teacher) {
       return res.status(404).json({
         success: false,
-        message: 'Teacher not found'
+        message: 'Teacher not found',
       });
     }
 
-    if (req.user.role !== 'admin' && teacherResult.rows[0].user_id !== req.user.id) {
+    if (req.user.role !== 'admin' && teacher.userId !== req.user.id) {
       return res.status(403).json({
         success: false,
-        message: 'Not authorized'
+        message: 'Not authorized',
       });
     }
 
-    const result = await query(
-      'SELECT id, type, file_url, file_name, uploaded_at FROM documents WHERE teacher_id = $1',
-      [id]
-    );
+    const documents = await getTeacherDocuments(id);
 
-    res.json({
+    return res.json({
       success: true,
-      data: result.rows
+      data: documents,
     });
   } catch (error) {
     console.error('Get documents error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get documents'
+      message: 'Failed to get documents',
+    });
+  }
+});
+
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const teacher = await buildTeacherPayload(id);
+
+    if (!teacher || !teacher.isLive) {
+      return res.status(404).json({
+        success: false,
+        message: 'Teacher not found',
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: teacher,
+    });
+  } catch (error) {
+    console.error('Get teacher error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get teacher',
     });
   }
 });

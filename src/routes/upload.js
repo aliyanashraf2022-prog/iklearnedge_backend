@@ -1,7 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
-const { authenticate } = require('../middleware/auth');
+const { authenticate, requireStudent, requireTeacher } = require('../middleware/auth');
 const { query } = require('../models/database');
 
 const router = express.Router();
@@ -83,7 +83,7 @@ router.post('/profile-picture', authenticate, upload.single('file'), async (req,
 // @route   POST /api/upload/document
 // @desc    Upload teacher document (degree, certificate, ID)
 // @access  Private/Teacher
-router.post('/document', authenticate, upload.single('file'), async (req, res) => {
+router.post('/document', authenticate, requireTeacher, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -151,7 +151,7 @@ router.post('/document', authenticate, upload.single('file'), async (req, res) =
 // @route   POST /api/upload/payment-proof
 // @desc    Upload payment proof
 // @access  Private/Student
-router.post('/payment-proof', authenticate, upload.single('file'), async (req, res) => {
+router.post('/payment-proof', authenticate, requireStudent, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -169,7 +169,6 @@ router.post('/payment-proof', authenticate, upload.single('file'), async (req, r
       });
     }
 
-    // Verify booking belongs to student
     const studentResult = await query(
       'SELECT id FROM students WHERE user_id = $1',
       [req.user.id]
@@ -182,14 +181,12 @@ router.post('/payment-proof', authenticate, upload.single('file'), async (req, r
       });
     }
 
-    const studentId = studentResult.rows[0].id;
-
     const bookingResult = await query(
       'SELECT id FROM bookings WHERE id = $1 AND student_id = $2',
-      [bookingId, studentId]
+      [bookingId, studentResult.rows[0].id]
     );
 
-    if (bookingResult.rows.length === 0) {
+    if (!bookingResult.rows.length) {
       return res.status(404).json({
         success: false,
         message: 'Booking not found'
@@ -207,18 +204,12 @@ router.post('/payment-proof', authenticate, upload.single('file'), async (req, r
       resource_type: 'auto'
     });
 
-    // Update booking receipt_url and status to pending_admin
-    await query(
-      `UPDATE bookings SET receipt_url = $1, status = 'pending_admin', updated_at = NOW()
-       WHERE id = $2`,
-      [result.secure_url, bookingId]
-    );
-
     res.json({
       success: true,
       message: 'Payment proof uploaded successfully',
       data: {
         url: result.secure_url,
+        fileName: req.file.originalname,
         publicId: result.public_id
       }
     });

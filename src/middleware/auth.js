@@ -20,7 +20,14 @@ const authenticate = async (req, res, next) => {
     
     // Get user from database
     const result = await query(
-      'SELECT id, email, name, role, profile_picture FROM users WHERE id = $1',
+      `SELECT
+         id,
+         email,
+         name,
+         role,
+         profile_picture AS "profilePicture"
+       FROM users
+       WHERE id = $1`,
       [decoded.userId]
     );
     

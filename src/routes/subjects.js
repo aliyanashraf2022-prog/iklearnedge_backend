@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const { query, transaction } = require('../models/database');
 const { authenticate, requireAdmin } = require('../middleware/auth');
+const { getGradeCandidates } = require('../utils/workflow');
 
 const router = express.Router();
 
@@ -150,9 +151,16 @@ router.get('/:id/price', async (req, res) => {
       });
     }
 
+    const candidates = getGradeCandidates(gradeLevel);
+
     const result = await query(
-      'SELECT price_per_hour FROM pricing_tiers WHERE subject_id = $1 AND grade_level = $2',
-      [id, gradeLevel]
+      `SELECT price_per_hour
+       FROM pricing_tiers
+       WHERE subject_id = $1
+         AND grade_level = ANY($2::text[])
+       ORDER BY CASE WHEN grade_level = $3 THEN 0 ELSE 1 END
+       LIMIT 1`,
+      [id, candidates, String(gradeLevel).trim()]
     );
 
     if (result.rows.length === 0) {

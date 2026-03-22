@@ -1,9 +1,16 @@
 const { Pool } = require('pg');
 
+const connectionString = process.env.DATABASE_URL || '';
+const shouldUseSsl = (
+  process.env.PGSSLMODE === 'require'
+  || /supabase\.co/i.test(connectionString)
+  || process.env.NODE_ENV === 'production'
+);
+
 // Database configuration
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? {
+  connectionString,
+  ssl: shouldUseSsl ? {
     rejectUnauthorized: false
   } : false,
   max: 3, // Maximum number of clients in the pool

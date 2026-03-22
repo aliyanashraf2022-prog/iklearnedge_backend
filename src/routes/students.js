@@ -1,252 +1,265 @@
 const express = require('express');
+const { body, validationResult } = require('express-validator');
 const { query } = require('../models/database');
-const { authenticate, requireStudent, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireStudent } = require('../middleware/auth');
+const {
+  DB_BOOKING_STATUS,
+  getStudentProfile,
+} = require('../utils/workflow');
 
 const router = express.Router();
 
-// @route   GET /api/students/profile
-// @desc    Get current student profile
-// @access  Private/Student
+const validate = (rules) => [
+  ...rules,
+  (req, res, next) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array(),
+      });
+    }
+    return next();
+  },
+];
+
 router.get('/profile', authenticate, requireStudent, async (req, res) => {
   try {
-    const result = await query(`
-      SELECT 
-        s.id, s.user_id, u.name, u.email, u.profile_picture,
-        s.grade_level, s.parent_contact, s.location
-      FROM students s
-      JOIN users u ON s.user_id = u.id
-      WHERE s.user_id = $1
-    `, [req.user.id]);
+    const student = await getStudentProfile(req.user.id);
 
-    if (result.rows.length === 0) {
+    if (!student) {
       return res.status(404).json({
         success: false,
-        message: 'Student profile not found'
+        message: 'Student profile not found',
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
-      data: result.rows[0]
+      data: student,
     });
   } catch (error) {
     console.error('Get student profile error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get student profile'
+      message: 'Failed to get student profile',
     });
   }
 });
 
-// @route   PUT /api/students/profile
-// @desc    Update student profile
-// @access  Private/Student
-router.put('/profile', authenticate, requireStudent, async (req, res) => {
-  try {
-    const { gradeLevel, parentContact, location } = req.body;
+router.put(
+  '/profile',
+  authenticate,
+  requireStudent,
+  validate([
+    body('gradeLevel').optional().isString(),
+    body('parentContact').optional().isString(),
+    body('location').optional().isString(),
+  ]),
+  async (req, res) => {
+    try {
+      const student = await getStudentProfile(req.user.id);
+      if (!student) {
+        return res.status(404).json({
+          success: false,
+          message: 'Student profile not found',
+        });
+      }
 
-    // Get student ID
-    const studentResult = await query(
-      'SELECT id FROM students WHERE user_id = $1',
-      [req.user.id]
-    );
+      const { gradeLevel, parentContact, location } = req.body;
+      const updates = [];
+      const values = [];
 
-    if (studentResult.rows.length === 0) {
-      return res.status(404).json({
+      if (gradeLevel !== undefined) {
+        values.push(gradeLevel);
+        updates.push(`grade_level = $${values.length}`);
+      }
+
+      if (parentContact !== undefined) {
+        values.push(parentContact);
+        updates.push(`parent_contact = $${values.length}`);
+      }
+
+      if (location !== undefined) {
+        values.push(location);
+        updates.push(`location = $${values.length}`);
+      }
+
+      if (!updates.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'No fields to update',
+        });
+      }
+
+      values.push(student.id);
+
+      await query(
+        `UPDATE students
+         SET ${updates.join(', ')}, updated_at = NOW()
+         WHERE id = $${values.length}`,
+        values,
+      );
+
+      const updated = await getStudentProfile(req.user.id);
+
+      return res.json({
+        success: true,
+        message: 'Profile updated successfully',
+        data: updated,
+      });
+    } catch (error) {
+      console.error('Update student profile error:', error);
+      return res.status(500).json({
         success: false,
-        message: 'Student not found'
+        message: 'Failed to update profile',
       });
     }
+  },
+);
 
-    const studentId = studentResult.rows[0].id;
-
-    const updates = [];
-    const values = [];
-    let paramCount = 1;
-
-    if (gradeLevel !== undefined) {
-      updates.push(`grade_level = $${paramCount}`);
-      values.push(gradeLevel);
-      paramCount++;
-    }
-
-    if (parentContact !== undefined) {
-      updates.push(`parent_contact = $${paramCount}`);
-      values.push(parentContact);
-      paramCount++;
-    }
-
-    if (location !== undefined) {
-      updates.push(`location = $${paramCount}`);
-      values.push(location);
-      paramCount++;
-    }
-
-    if (updates.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No fields to update'
-      });
-    }
-
-    values.push(studentId);
-
-    await query(
-      `UPDATE students SET ${updates.join(', ')}, updated_at = NOW()
-       WHERE id = $${paramCount}`,
-      values
-    );
-
-    res.json({
-      success: true,
-      message: 'Profile updated successfully'
-    });
-  } catch (error) {
-    console.error('Update student profile error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update profile'
-    });
-  }
-});
-
-// @route   GET /api/students/my-teachers
-// @desc    Get student's teachers
-// @access  Private/Student
 router.get('/my-teachers', authenticate, requireStudent, async (req, res) => {
   try {
-    // Get student ID
-    const studentResult = await query(
-      'SELECT id FROM students WHERE user_id = $1',
-      [req.user.id]
-    );
-
-    if (studentResult.rows.length === 0) {
+    const student = await getStudentProfile(req.user.id);
+    if (!student) {
       return res.status(404).json({
         success: false,
-        message: 'Student not found'
+        message: 'Student profile not found',
       });
     }
 
-    const studentId = studentResult.rows[0].id;
+    const result = await query(
+      `SELECT DISTINCT
+         t.id,
+         t.user_id AS "userId",
+         t.bio,
+         t.verification_status AS "verificationStatus",
+         t.is_live AS "isLive",
+         t.meeting_link AS "meetingLink",
+         u.name,
+         u.email,
+         u.profile_picture AS "profilePicture"
+       FROM bookings b
+       JOIN teachers t ON b.teacher_id = t.id
+       JOIN users u ON t.user_id = u.id
+       WHERE b.student_id = $1
+         AND (
+           (b.status = $2 AND b.meeting_link IS NOT NULL)
+           OR b.status = $3
+         )
+       ORDER BY u.name`,
+      [
+        student.id,
+        DB_BOOKING_STATUS.CONFIRMED,
+        DB_BOOKING_STATUS.COMPLETED,
+      ],
+    );
 
-    const result = await query(`
-      SELECT DISTINCT
-        t.id, u.name, u.email, u.profile_picture,
-        t.bio, t.meeting_link
-      FROM bookings b
-      JOIN teachers t ON b.teacher_id = t.id
-      JOIN users u ON t.user_id = u.id
-      WHERE b.student_id = $1 AND b.status IN ('confirmed', 'completed')
-    `, [studentId]);
-
-    res.json({
+    return res.json({
       success: true,
       count: result.rows.length,
-      data: result.rows
+      data: result.rows,
     });
   } catch (error) {
     console.error('Get my teachers error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get teachers'
+      message: 'Failed to get teachers',
     });
   }
 });
 
-// @route   GET /api/students/stats
-// @desc    Get student statistics
-// @access  Private/Student
 router.get('/stats', authenticate, requireStudent, async (req, res) => {
   try {
-    // Get student ID
-    const studentResult = await query(
-      'SELECT id FROM students WHERE user_id = $1',
-      [req.user.id]
-    );
-
-    if (studentResult.rows.length === 0) {
+    const student = await getStudentProfile(req.user.id);
+    if (!student) {
       return res.status(404).json({
         success: false,
-        message: 'Student not found'
+        message: 'Student profile not found',
       });
     }
 
-    const studentId = studentResult.rows[0].id;
+    const [totals, upcoming, completed, spent, favoriteTeachers] = await Promise.all([
+      query('SELECT COUNT(*) FROM bookings WHERE student_id = $1', [student.id]),
+      query(
+        `SELECT COUNT(*)
+         FROM bookings
+         WHERE student_id = $1
+           AND status = $2
+           AND meeting_link IS NOT NULL
+           AND scheduled_date >= NOW()`,
+        [student.id, DB_BOOKING_STATUS.CONFIRMED],
+      ),
+      query(
+        `SELECT COUNT(*)
+         FROM bookings
+         WHERE student_id = $1
+           AND status = $2`,
+        [student.id, DB_BOOKING_STATUS.COMPLETED],
+      ),
+      query(
+        `SELECT COALESCE(SUM(total_amount), 0) AS amount
+         FROM bookings
+         WHERE student_id = $1
+           AND status IN ($2, $3)`,
+        [student.id, DB_BOOKING_STATUS.CONFIRMED, DB_BOOKING_STATUS.COMPLETED],
+      ),
+      query(
+        `SELECT COUNT(DISTINCT teacher_id)
+         FROM bookings
+         WHERE student_id = $1
+           AND status IN ($2, $3)`,
+        [student.id, DB_BOOKING_STATUS.CONFIRMED, DB_BOOKING_STATUS.COMPLETED],
+      ),
+    ]);
 
-    // Get stats
-    const totalBookings = await query(
-      'SELECT COUNT(*) FROM bookings WHERE student_id = $1',
-      [studentId]
-    );
-
-    const upcomingClasses = await query(
-      `SELECT COUNT(*) FROM bookings 
-       WHERE student_id = $1 AND status = 'confirmed' AND scheduled_date > NOW()`,
-      [studentId]
-    );
-
-    const completedClasses = await query(
-      `SELECT COUNT(*) FROM bookings 
-       WHERE student_id = $1 AND status = 'completed'`,
-      [studentId]
-    );
-
-    const totalSpent = await query(
-      `SELECT COALESCE(SUM(total_amount), 0) FROM bookings 
-       WHERE student_id = $1 AND status IN ('confirmed', 'completed')`,
-      [studentId]
-    );
-
-    const favoriteTeachers = await query(`
-      SELECT COUNT(DISTINCT teacher_id) FROM bookings 
-      WHERE student_id = $1 AND status IN ('confirmed', 'completed')
-    `, [studentId]);
-
-    res.json({
+    return res.json({
       success: true,
       data: {
-        totalBookings: parseInt(totalBookings.rows[0].count),
-        upcomingClasses: parseInt(upcomingClasses.rows[0].count),
-        completedClasses: parseInt(completedClasses.rows[0].count),
-        totalSpent: parseFloat(totalSpent.rows[0].coalesce),
-        favoriteTeachers: parseInt(favoriteTeachers.rows[0].count)
-      }
+        totalBookings: Number(totals.rows[0].count || 0),
+        upcomingClasses: Number(upcoming.rows[0].count || 0),
+        completedClasses: Number(completed.rows[0].count || 0),
+        totalSpent: Number(spent.rows[0].amount || 0),
+        favoriteTeachers: Number(favoriteTeachers.rows[0].count || 0),
+      },
     });
   } catch (error) {
     console.error('Get stats error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get statistics'
+      message: 'Failed to get statistics',
     });
   }
 });
 
-// @route   GET /api/students/all
-// @desc    Get all students (admin only)
-// @access  Private/Admin
 router.get('/all', authenticate, requireAdmin, async (req, res) => {
   try {
-    const result = await query(`
-      SELECT 
-        s.id, s.user_id, u.name, u.email, u.profile_picture,
-        s.grade_level, s.parent_contact, s.location,
-        s.created_at
-      FROM students s
-      JOIN users u ON s.user_id = u.id
-      ORDER BY s.created_at DESC
-    `);
+    const result = await query(
+      `SELECT
+         s.id,
+         s.user_id AS "userId",
+         s.grade_level AS "gradeLevel",
+         s.parent_contact AS "parentContact",
+         s.location,
+         s.created_at AS "createdAt",
+         u.name,
+         u.email,
+         u.profile_picture AS "profilePicture"
+       FROM students s
+       JOIN users u ON s.user_id = u.id
+       ORDER BY s.created_at DESC`,
+    );
 
-    res.json({
+    return res.json({
       success: true,
       count: result.rows.length,
-      data: result.rows
+      data: result.rows,
     });
   } catch (error) {
     console.error('Get all students error:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: 'Failed to get students'
+      message: 'Failed to get students',
     });
   }
 });
