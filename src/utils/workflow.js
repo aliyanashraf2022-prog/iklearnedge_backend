@@ -46,7 +46,7 @@ const GRADE_LEVEL_NORMALIZATION = Object.freeze({
   secondary: 'Grade 9-10 (Secondary)',
 });
 
-const getDemoBookingPredicate = (alias = 'b') => {
+const getDemoBookingPredicate = (alias = '') => {
   const prefix = alias ? `${alias}.` : '';
   return `((COALESCE(${prefix}total_amount, 0) = 0 AND COALESCE(${prefix}price_per_hour, 0) = 0) OR LOWER(COALESCE(${prefix}notes, '')) LIKE 'demo%')`;
 };
