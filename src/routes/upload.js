@@ -32,6 +32,23 @@ const upload = multer({
   }
 });
 
+const buildDataUri = (file) => {
+  const base64String = file.buffer.toString('base64');
+  return `data:${file.mimetype};base64,${base64String}`;
+};
+
+const uploadWithFallback = async (dataUri, options) => {
+  try {
+    return await cloudinary.uploader.upload(dataUri, options);
+  } catch (error) {
+    console.warn('Cloudinary upload failed, falling back to inline asset:', error.message);
+    return {
+      secure_url: dataUri,
+      public_id: `inline:${options.public_id || Date.now()}`,
+    };
+  }
+};
+
 // @route   POST /api/upload/profile-picture
 // @desc    Upload profile picture
 // @access  Private
@@ -44,12 +61,9 @@ router.post('/profile-picture', authenticate, upload.single('file'), async (req,
       });
     }
 
-    // Convert buffer to base64
-    const base64String = req.file.buffer.toString('base64');
-    const dataUri = `data:${req.file.mimetype};base64,${base64String}`;
+    const dataUri = buildDataUri(req.file);
 
-    // Upload to Cloudinary
-    const result = await cloudinary.uploader.upload(dataUri, {
+    const result = await uploadWithFallback(dataUri, {
       folder: 'iklearnedge/profiles',
       public_id: `user_${req.user.id}_${Date.now()}`,
       transformation: [
@@ -116,12 +130,9 @@ router.post('/document', authenticate, requireTeacher, upload.single('file'), as
 
     const teacherId = teacherResult.rows[0].id;
 
-    // Convert buffer to base64
-    const base64String = req.file.buffer.toString('base64');
-    const dataUri = `data:${req.file.mimetype};base64,${base64String}`;
+    const dataUri = buildDataUri(req.file);
 
-    // Upload to Cloudinary
-    const result = await cloudinary.uploader.upload(dataUri, {
+    const result = await uploadWithFallback(dataUri, {
       folder: `iklearnedge/documents/${type}`,
       public_id: `teacher_${teacherId}_${type}_${Date.now()}`,
       resource_type: 'auto'
@@ -193,12 +204,9 @@ router.post('/payment-proof', authenticate, requireStudent, upload.single('file'
       });
     }
 
-    // Convert buffer to base64
-    const base64String = req.file.buffer.toString('base64');
-    const dataUri = `data:${req.file.mimetype};base64,${base64String}`;
+    const dataUri = buildDataUri(req.file);
 
-    // Upload to Cloudinary
-    const result = await cloudinary.uploader.upload(dataUri, {
+    const result = await uploadWithFallback(dataUri, {
       folder: 'iklearnedge/payments',
       public_id: `payment_${bookingId}_${Date.now()}`,
       resource_type: 'auto'
@@ -229,8 +237,9 @@ router.delete('/:publicId', authenticate, async (req, res) => {
   try {
     const { publicId } = req.params;
 
-    // Delete from Cloudinary
-    await cloudinary.uploader.destroy(publicId);
+    if (!String(publicId).startsWith('inline:')) {
+      await cloudinary.uploader.destroy(publicId);
+    }
 
     res.json({
       success: true,
